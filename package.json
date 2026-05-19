@@ -50,7 +50,7 @@
     "cmdk": "^1.1.1",
     "date-fns": "^3.6.0",
     "embla-carousel-react": "^8.6.0",
-    "framer-motion": "^11.11.17",
+    "framer-motion": "^11.18.2",
     "input-otp": "^1.4.2",
     "lucide-react": "^0.469.0",
     "next-themes": "^0.4.6",
@@ -71,6 +71,7 @@
     "zod": "^3.24.2"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.103.0"
+    "@supabase/supabase-js": "^2.103.0",
+    "react-router-dom": "^7.15.1"
   }
 }

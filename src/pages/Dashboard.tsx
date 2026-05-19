@@ -269,18 +269,48 @@ export default function Dashboard() {
         <ProfileGrid
           profiles={profiles}
           onCreateClick={() => setCreateModalOpen(true)}
-          onConnectClick={(id) => setConnectModalProfileId(id)}
+          onConnectClick={(id) => {
+            const selectedProfile = profiles.find(
+              (p) => p.id === id
+            );
+
+            if (!selectedProfile) return;
+
+            localStorage.setItem(
+              "active_profile",
+              selectedProfile.name
+            );
+
+            console.log(
+              "ACTIVE PROFILE:",
+              selectedProfile.name
+            );
+
+            setConnectModalProfileId(id);
+          }}
           onConfigClick={(id) => {
             const selectedProfile = profiles.find((p) => p.id === id);
 
             if (!selectedProfile) return;
 
+            localStorage.setItem(
+              "active_profile",
+              selectedProfile.name
+            );
+
+            console.log(
+              "ACTIVE PROFILE:",
+              selectedProfile.name
+            );
+
             if (selectedProfile.status === "not_connected") {
               toast({
                 title: "Connect WhatsApp First",
-                description: "You need to connect WhatsApp before configuring the assistant.",
+                description:
+                  "You need to connect WhatsApp before configuring the assistant.",
                 variant: "destructive",
               });
+
               return;
             }
 

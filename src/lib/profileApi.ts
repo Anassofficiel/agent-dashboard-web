@@ -182,8 +182,15 @@ export async function checkWhatsAppConnection(profileId: string) {
     const profile = await getProfileById(profileId);
     return getEvolutionConnectionState(profile.instance_name);
 }
-
 export async function getProfiles() {
+    const {
+        data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+        return [];
+    }
+
     const { data, error } = await supabase
         .from("profiles")
         .select(`
@@ -209,6 +216,7 @@ export async function getProfiles() {
         pairing_code
       )
     `)
+        .eq("user_id", user.id)
         .order("created_at", { ascending: false });
 
     if (error) throw error;
@@ -221,80 +229,92 @@ export async function getProfiles() {
                 return profile;
             }
 
-            const realConnectionState = await getEvolutionConnectionState(instanceName);
-            const shouldBeConnected = realConnectionState === "connected";
-            const nextProfileStatus = shouldBeConnected ? "connected" : "not_connected";
-            const nextSessionStatus = shouldBeConnected ? "connected" : "not_connected";
+            const realConnectionState =
+                await getEvolutionConnectionState(instanceName);
 
-            if (profile.connection_status !== nextProfileStatus) {
-                const { error: updateProfileError } = await supabase
+            const shouldBeConnected =
+                realConnectionState === "connected";
+
+            const nextProfileStatus =
+                shouldBeConnected
+                    ? "connected"
+                    : "not_connected";
+
+            const nextSessionStatus =
+                shouldBeConnected
+                    ? "connected"
+                    : "not_connected";
+
+            if (
+                profile.connection_status !==
+                nextProfileStatus
+            ) {
+                await supabase
                     .from("profiles")
                     .update({
-                        connection_status: nextProfileStatus,
+                        connection_status:
+                            nextProfileStatus,
                     })
                     .eq("id", profile.id);
-
-                if (updateProfileError) {
-                    throw updateProfileError;
-                }
             }
 
-            const currentSession = Array.isArray(profile.whatsapp_sessions)
-                ? profile.whatsapp_sessions[0]
-                : profile.whatsapp_sessions || null;
+            const currentSession =
+                Array.isArray(
+                    profile.whatsapp_sessions
+                )
+                    ? profile.whatsapp_sessions[0]
+                    : profile.whatsapp_sessions ||
+                    null;
 
-            const { error: updateSessionError } = await supabase
+            await supabase
                 .from("whatsapp_sessions")
                 .upsert(
                     [
                         {
                             profile_id: profile.id,
-                            session_id: instanceName,
-                            instance_name: instanceName,
-                            status: nextSessionStatus,
-                            qr_code: currentSession?.qr_code ?? null,
-                            pairing_code: currentSession?.pairing_code ?? null,
-                            connected_at: shouldBeConnected
-                                ? currentSession?.connected_at || new Date().toISOString()
-                                : null,
-                            updated_at: new Date().toISOString(),
+                            session_id:
+                                instanceName,
+                            instance_name:
+                                instanceName,
+                            status:
+                                nextSessionStatus,
+                            qr_code:
+                                currentSession?.qr_code ??
+                                null,
+                            pairing_code:
+                                currentSession?.pairing_code ??
+                                null,
+                            connected_at:
+                                shouldBeConnected
+                                    ? currentSession?.connected_at ||
+                                    new Date().toISOString()
+                                    : null,
+                            updated_at:
+                                new Date().toISOString(),
                         },
                     ],
-                    { onConflict: "profile_id" }
+                    {
+                        onConflict:
+                            "profile_id",
+                    }
                 );
 
-            if (updateSessionError) {
-                throw updateSessionError;
-            }
-
             if (!shouldBeConnected) {
-                const { error: assistantError } = await supabase
+                await supabase
                     .from("assistant_configs")
-                    .update({ is_active: false })
-                    .eq("profile_id", profile.id);
-
-                if (assistantError) {
-                    throw assistantError;
-                }
+                    .update({
+                        is_active: false,
+                    })
+                    .eq(
+                        "profile_id",
+                        profile.id
+                    );
             }
 
             return {
                 ...profile,
-                connection_status: nextProfileStatus,
-                whatsapp_sessions: [
-                    {
-                        profile_id: profile.id,
-                        session_id: instanceName,
-                        instance_name: instanceName,
-                        status: nextSessionStatus,
-                        qr_code: currentSession?.qr_code ?? null,
-                        pairing_code: currentSession?.pairing_code ?? null,
-                        connected_at: shouldBeConnected
-                            ? currentSession?.connected_at || new Date().toISOString()
-                            : null,
-                        updated_at: new Date().toISOString(),
-                    },
-                ],
+                connection_status:
+                    nextProfileStatus,
             };
         })
     );
@@ -302,29 +322,63 @@ export async function getProfiles() {
     return syncedProfiles;
 }
 
-export async function createProfile(name: string) {
+export async function createProfile(
+    name: string
+) {
     const trimmedName = name.trim();
 
     if (!trimmedName) {
-        throw new Error("Profile name is required.");
+        throw new Error(
+            "Profile name is required."
+        );
     }
 
-    const instanceName = generateInstanceName();
+    const {
+        data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+        throw new Error(
+            "User not authenticated"
+        );
+    }
+
+    const instanceName =
+        generateInstanceName();
+
+    // shared credits from user_credits
+    const { data: creditsData } =
+        await supabase
+            .from("user_credits")
+            .select("credits")
+            .eq("user_id", user.id)
+            .single();
+
+    const sharedCredits =
+        creditsData?.credits || 200;
 
     // 1) create profile
-    const { data: profile, error: profileError } = await supabase
-        .from("profiles")
-        .insert([
-            {
-                name: trimmedName,
-                connection_status: "not_connected",
-                phone_number: null,
-                instance_name: instanceName,
-            },
-        ])
-        .select()
-        .single();
+    const { data: profile, error: profileError } =
+        await supabase
+            .from("profiles")
+            .insert([
+                {
+                    name: trimmedName,
+                    user_id: user.id,
+                    connection_status:
+                        "not_connected",
+                    instance_name:
+                        instanceName,
+                    phone_number: null,
 
+                    // shared credits
+                    credits: sharedCredits,
+
+                    plan: "free",
+                },
+            ])
+            .select()
+            .single();
     if (profileError) throw profileError;
 
     try {
@@ -517,14 +571,44 @@ export async function disconnectWhatsApp(profileId: string) {
 
     return true;
 }
-
 export async function sendWhatsAppTextMessage({
     profileId,
     to,
     message,
 }: SendTextMessageParams) {
     const profile = await getProfileById(profileId);
-    const state = await getEvolutionConnectionState(profile.instance_name);
+
+    // تحقق من shared credits
+    const {
+        data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+        throw new Error(
+            "User not authenticated"
+        );
+    }
+
+    const { data: currentCredits } =
+        await supabase
+            .from("user_credits")
+            .select("credits")
+            .eq("user_id", user.id)
+            .single();
+
+    if (
+        !currentCredits ||
+        currentCredits.credits <= 0
+    ) {
+        throw new Error(
+            "No credits remaining"
+        );
+    }
+
+    const state =
+        await getEvolutionConnectionState(
+            profile.instance_name
+        );
 
     if (state !== "connected") {
         throw new Error(
@@ -532,20 +616,40 @@ export async function sendWhatsAppTextMessage({
         );
     }
 
-    const number = normalizePhoneNumber(to);
+    const number =
+        normalizePhoneNumber(to);
 
-    const data = await evolutionRequest(
-        `/message/sendText/${profile.instance_name}`,
-        {
-            method: "POST",
-            body: JSON.stringify({
-                number,
-                text: message,
-            }),
-        }
-    );
+    const data =
+        await evolutionRequest(
+            `/message/sendText/${profile.instance_name}`,
+            {
+                method: "POST",
+                body: JSON.stringify({
+                    number,
+                    text: message,
+                }),
+            }
+        );
 
-    return data;
+    // deduct shared credits
+    const deduction =
+        await deductCredits(profileId, 5);
+
+    // sync all profiles credits instantly
+    await supabase
+        .from("profiles")
+        .update({
+            credits:
+                deduction.remainingCredits,
+        })
+        .eq("user_id", user.id);
+
+    return {
+        success: true,
+        data,
+        remainingCredits:
+            deduction.remainingCredits,
+    };
 }
 
 export async function getWhatsAppSessionByProfileId(profileId: string) {
@@ -613,4 +717,84 @@ export async function refreshProfileConnectionState(profileId: string) {
     }
 
     return isConnected ? "connected" : "not_connected";
+}
+export async function deductCredits(
+    profileId: string,
+    amount: number = 5
+) {
+
+    const {
+        data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+        throw new Error("User not authenticated");
+    }
+
+    // get shared credits
+    const { data: userCredits, error } =
+        await supabase
+            .from("user_credits")
+            .select("credits")
+            .eq("user_id", user.id)
+            .single();
+
+    if (error) {
+        throw error;
+    }
+
+    const currentCredits =
+        userCredits?.credits || 0;
+
+    if (currentCredits <= 0) {
+        throw new Error(
+            "No credits remaining"
+        );
+    }
+
+    const newCredits =
+        currentCredits - amount;
+
+    const finalCredits =
+        newCredits < 0
+            ? 0
+            : newCredits;
+
+    // update shared credits
+    const { error: updateError } =
+        await supabase
+            .from("user_credits")
+            .update({
+                credits: finalCredits,
+            })
+            .eq("user_id", user.id);
+
+    if (updateError) {
+        throw updateError;
+    }
+
+    return {
+        success: true,
+        remainingCredits: finalCredits,
+    };
+}
+
+export async function getUserCredits() {
+
+    const {
+        data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+        return 0;
+    }
+
+    const { data } =
+        await supabase
+            .from("user_credits")
+            .select("credits")
+            .eq("user_id", user.id)
+            .single();
+
+    return data?.credits || 0;
 }
