@@ -1,4 +1,10 @@
 import { supabase } from "./supabase";
+import {
+  notifyCreditsLow,
+  notifyProfileCreated,
+  notifyWhatsAppDisconnected,
+  notifyUpgradeAvailable,
+} from "./sendNotification";
 
 const EVOLUTION_API_URL = import.meta.env.VITE_EVOLUTION_API_URL;
 const EVOLUTION_API_KEY = import.meta.env.VITE_EVOLUTION_API_KEY;
@@ -182,6 +188,7 @@ export async function checkWhatsAppConnection(profileId: string) {
     const profile = await getProfileById(profileId);
     return getEvolutionConnectionState(profile.instance_name);
 }
+
 export async function getProfiles() {
     const {
         data: { user },
@@ -232,39 +239,25 @@ export async function getProfiles() {
             const realConnectionState =
                 await getEvolutionConnectionState(instanceName);
 
-            const shouldBeConnected =
-                realConnectionState === "connected";
+            const shouldBeConnected = realConnectionState === "connected";
+            const nextProfileStatus = shouldBeConnected ? "connected" : "not_connected";
+            const nextSessionStatus = shouldBeConnected ? "connected" : "not_connected";
 
-            const nextProfileStatus =
-                shouldBeConnected
-                    ? "connected"
-                    : "not_connected";
-
-            const nextSessionStatus =
-                shouldBeConnected
-                    ? "connected"
-                    : "not_connected";
-
-            if (
-                profile.connection_status !==
-                nextProfileStatus
-            ) {
+            if (profile.connection_status !== nextProfileStatus) {
                 await supabase
                     .from("profiles")
-                    .update({
-                        connection_status:
-                            nextProfileStatus,
-                    })
+                    .update({ connection_status: nextProfileStatus })
                     .eq("id", profile.id);
+
+                // 🔴 Notify when WhatsApp goes from connected → disconnected
+                if (!shouldBeConnected && profile.connection_status === "connected") {
+                    notifyWhatsAppDisconnected(user.id, profile.name).catch(console.error);
+                }
             }
 
-            const currentSession =
-                Array.isArray(
-                    profile.whatsapp_sessions
-                )
-                    ? profile.whatsapp_sessions[0]
-                    : profile.whatsapp_sessions ||
-                    null;
+            const currentSession = Array.isArray(profile.whatsapp_sessions)
+                ? profile.whatsapp_sessions[0]
+                : profile.whatsapp_sessions || null;
 
             await supabase
                 .from("whatsapp_sessions")
@@ -272,49 +265,30 @@ export async function getProfiles() {
                     [
                         {
                             profile_id: profile.id,
-                            session_id:
-                                instanceName,
-                            instance_name:
-                                instanceName,
-                            status:
-                                nextSessionStatus,
-                            qr_code:
-                                currentSession?.qr_code ??
-                                null,
-                            pairing_code:
-                                currentSession?.pairing_code ??
-                                null,
-                            connected_at:
-                                shouldBeConnected
-                                    ? currentSession?.connected_at ||
-                                    new Date().toISOString()
-                                    : null,
-                            updated_at:
-                                new Date().toISOString(),
+                            session_id: instanceName,
+                            instance_name: instanceName,
+                            status: nextSessionStatus,
+                            qr_code: currentSession?.qr_code ?? null,
+                            pairing_code: currentSession?.pairing_code ?? null,
+                            connected_at: shouldBeConnected
+                                ? currentSession?.connected_at || new Date().toISOString()
+                                : null,
+                            updated_at: new Date().toISOString(),
                         },
                     ],
-                    {
-                        onConflict:
-                            "profile_id",
-                    }
+                    { onConflict: "profile_id" }
                 );
 
             if (!shouldBeConnected) {
                 await supabase
                     .from("assistant_configs")
-                    .update({
-                        is_active: false,
-                    })
-                    .eq(
-                        "profile_id",
-                        profile.id
-                    );
+                    .update({ is_active: false })
+                    .eq("profile_id", profile.id);
             }
 
             return {
                 ...profile,
-                connection_status:
-                    nextProfileStatus,
+                connection_status: nextProfileStatus,
             };
         })
     );
@@ -322,15 +296,11 @@ export async function getProfiles() {
     return syncedProfiles;
 }
 
-export async function createProfile(
-    name: string
-) {
+export async function createProfile(name: string) {
     const trimmedName = name.trim();
 
     if (!trimmedName) {
-        throw new Error(
-            "Profile name is required."
-        );
+        throw new Error("Profile name is required.");
     }
 
     const {
@@ -338,47 +308,37 @@ export async function createProfile(
     } = await supabase.auth.getUser();
 
     if (!user) {
-        throw new Error(
-            "User not authenticated"
-        );
+        throw new Error("User not authenticated");
     }
 
-    const instanceName =
-        generateInstanceName();
+    const instanceName = generateInstanceName();
 
     // shared credits from user_credits
-    const { data: creditsData } =
-        await supabase
-            .from("user_credits")
-            .select("credits")
-            .eq("user_id", user.id)
-            .single();
+    const { data: creditsData } = await supabase
+        .from("user_credits")
+        .select("credits")
+        .eq("user_id", user.id)
+        .single();
 
-    const sharedCredits =
-        creditsData?.credits || 200;
+    const sharedCredits = creditsData?.credits || 200;
 
     // 1) create profile
-    const { data: profile, error: profileError } =
-        await supabase
-            .from("profiles")
-            .insert([
-                {
-                    name: trimmedName,
-                    user_id: user.id,
-                    connection_status:
-                        "not_connected",
-                    instance_name:
-                        instanceName,
-                    phone_number: null,
+    const { data: profile, error: profileError } = await supabase
+        .from("profiles")
+        .insert([
+            {
+                name: trimmedName,
+                user_id: user.id,
+                connection_status: "not_connected",
+                instance_name: instanceName,
+                phone_number: null,
+                credits: sharedCredits,
+                plan: "free",
+            },
+        ])
+        .select()
+        .single();
 
-                    // shared credits
-                    credits: sharedCredits,
-
-                    plan: "free",
-                },
-            ])
-            .select()
-            .single();
     if (profileError) throw profileError;
 
     try {
@@ -421,9 +381,12 @@ export async function createProfile(
         // 4) create evolution instance
         await createEvolutionInstance(instanceName);
 
+        // 🚀 Notify: profile created successfully
+        notifyProfileCreated(user.id, trimmedName).catch(console.error);
+
         return profile;
     } catch (error) {
-        // rollback باش مايبقاش profile يتيم
+        // rollback
         await supabase.from("whatsapp_sessions").delete().eq("profile_id", profile.id);
         await supabase.from("assistant_configs").delete().eq("profile_id", profile.id);
         await supabase.from("profiles").delete().eq("id", profile.id);
@@ -494,9 +457,7 @@ export async function connectWhatsApp(profileId: string) {
 
     const { error: profileError } = await supabase
         .from("profiles")
-        .update({
-            connection_status: "not_connected",
-        })
+        .update({ connection_status: "not_connected" })
         .eq("id", profileId);
 
     if (profileError) throw profileError;
@@ -530,6 +491,10 @@ export async function disconnectWhatsApp(profileId: string) {
     const profile = await getProfileById(profileId);
     const instanceName = profile.instance_name;
 
+    const {
+        data: { user },
+    } = await supabase.auth.getUser();
+
     const { error: profileError } = await supabase
         .from("profiles")
         .update({
@@ -562,15 +527,19 @@ export async function disconnectWhatsApp(profileId: string) {
 
     const { error: assistantError } = await supabase
         .from("assistant_configs")
-        .update({
-            is_active: false,
-        })
+        .update({ is_active: false })
         .eq("profile_id", profileId);
 
     if (assistantError) throw assistantError;
 
+    // 🔴 Notify: WhatsApp disconnected (manual)
+    if (user) {
+        notifyWhatsAppDisconnected(user.id, profile.name).catch(console.error);
+    }
+
     return true;
 }
+
 export async function sendWhatsAppTextMessage({
     profileId,
     to,
@@ -578,37 +547,25 @@ export async function sendWhatsAppTextMessage({
 }: SendTextMessageParams) {
     const profile = await getProfileById(profileId);
 
-    // تحقق من shared credits
     const {
         data: { user },
     } = await supabase.auth.getUser();
 
     if (!user) {
-        throw new Error(
-            "User not authenticated"
-        );
+        throw new Error("User not authenticated");
     }
 
-    const { data: currentCredits } =
-        await supabase
-            .from("user_credits")
-            .select("credits")
-            .eq("user_id", user.id)
-            .single();
+    const { data: currentCredits } = await supabase
+        .from("user_credits")
+        .select("credits")
+        .eq("user_id", user.id)
+        .single();
 
-    if (
-        !currentCredits ||
-        currentCredits.credits <= 0
-    ) {
-        throw new Error(
-            "No credits remaining"
-        );
+    if (!currentCredits || currentCredits.credits <= 0) {
+        throw new Error("No credits remaining");
     }
 
-    const state =
-        await getEvolutionConnectionState(
-            profile.instance_name
-        );
+    const state = await getEvolutionConnectionState(profile.instance_name);
 
     if (state !== "connected") {
         throw new Error(
@@ -616,39 +573,34 @@ export async function sendWhatsAppTextMessage({
         );
     }
 
-    const number =
-        normalizePhoneNumber(to);
+    const number = normalizePhoneNumber(to);
 
-    const data =
-        await evolutionRequest(
-            `/message/sendText/${profile.instance_name}`,
-            {
-                method: "POST",
-                body: JSON.stringify({
-                    number,
-                    text: message,
-                }),
-            }
-        );
+    const data = await evolutionRequest(
+        `/message/sendText/${profile.instance_name}`,
+        {
+            method: "POST",
+            body: JSON.stringify({ number, text: message }),
+        }
+    );
 
     // deduct shared credits
-    const deduction =
-        await deductCredits(profileId, 5);
+    const deduction = await deductCredits(profileId, 5);
 
     // sync all profiles credits instantly
     await supabase
         .from("profiles")
-        .update({
-            credits:
-                deduction.remainingCredits,
-        })
+        .update({ credits: deduction.remainingCredits })
         .eq("user_id", user.id);
+
+    // ⚡ Notify if credits drop below 20
+    if (deduction.remainingCredits < 20) {
+        notifyCreditsLow(user.id, deduction.remainingCredits).catch(console.error);
+    }
 
     return {
         success: true,
         data,
-        remainingCredits:
-            deduction.remainingCredits,
+        remainingCredits: deduction.remainingCredits,
     };
 }
 
@@ -704,25 +656,10 @@ export async function refreshProfileConnectionState(profileId: string) {
 
     if (sessionError) throw sessionError;
 
-    if (isConnected) {
-        const { data: assistantConfig } = await supabase
-            .from("assistant_configs")
-            .select("profile_id, is_active")
-            .eq("profile_id", profileId)
-            .maybeSingle();
-
-        if (assistantConfig?.is_active === false) {
-            // intentionally keep it disabled
-        }
-    }
-
     return isConnected ? "connected" : "not_connected";
 }
-export async function deductCredits(
-    profileId: string,
-    amount: number = 5
-) {
 
+export async function deductCredits(profileId: string, amount: number = 5) {
     const {
         data: { user },
     } = await supabase.auth.getUser();
@@ -732,45 +669,38 @@ export async function deductCredits(
     }
 
     // get shared credits
-    const { data: userCredits, error } =
-        await supabase
-            .from("user_credits")
-            .select("credits")
-            .eq("user_id", user.id)
-            .single();
+    const { data: userCredits, error } = await supabase
+        .from("user_credits")
+        .select("credits")
+        .eq("user_id", user.id)
+        .single();
 
     if (error) {
         throw error;
     }
 
-    const currentCredits =
-        userCredits?.credits || 0;
+    const currentCredits = userCredits?.credits || 0;
 
     if (currentCredits <= 0) {
-        throw new Error(
-            "No credits remaining"
-        );
+        throw new Error("No credits remaining");
     }
 
-    const newCredits =
-        currentCredits - amount;
-
-    const finalCredits =
-        newCredits < 0
-            ? 0
-            : newCredits;
+    const newCredits = currentCredits - amount;
+    const finalCredits = newCredits < 0 ? 0 : newCredits;
 
     // update shared credits
-    const { error: updateError } =
-        await supabase
-            .from("user_credits")
-            .update({
-                credits: finalCredits,
-            })
-            .eq("user_id", user.id);
+    const { error: updateError } = await supabase
+        .from("user_credits")
+        .update({ credits: finalCredits })
+        .eq("user_id", user.id);
 
     if (updateError) {
         throw updateError;
+    }
+
+    // ⚡ Notify if credits drop below 20
+    if (finalCredits < 20) {
+        notifyCreditsLow(user.id, finalCredits).catch(console.error);
     }
 
     return {
@@ -780,7 +710,6 @@ export async function deductCredits(
 }
 
 export async function getUserCredits() {
-
     const {
         data: { user },
     } = await supabase.auth.getUser();
@@ -789,12 +718,11 @@ export async function getUserCredits() {
         return 0;
     }
 
-    const { data } =
-        await supabase
-            .from("user_credits")
-            .select("credits")
-            .eq("user_id", user.id)
-            .single();
+    const { data } = await supabase
+        .from("user_credits")
+        .select("credits")
+        .eq("user_id", user.id)
+        .single();
 
     return data?.credits || 0;
 }

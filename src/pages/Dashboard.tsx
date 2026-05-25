@@ -7,6 +7,10 @@ import { ConnectWhatsAppModal } from "@/components/modals/ConnectWhatsAppModal";
 import { ConfigureAssistantModal } from "@/components/modals/ConfigureAssistantModal";
 import { Profile, AssistantConfig } from "@/types";
 import { useToast } from "@/hooks/use-toast";
+import SubscriptionSection from "@/components/SubscriptionSection";
+
+import { notifyUpgradeAvailable, notifyDailyReport } from "@/lib/sendNotification";
+import { supabase } from "@/lib/supabase";
 import {
   getProfiles,
   createProfile,
@@ -95,15 +99,14 @@ export default function Dashboard() {
   const [configModalProfileId, setConfigModalProfileId] = useState<string | null>(null);
   const [isLoadingProfiles, setIsLoadingProfiles] = useState(false);
 
+  // ─── Load profiles ─────────────────────────────────────────────────────────
+
   const loadProfiles = useCallback(async () => {
     try {
       setIsLoadingProfiles(true);
-
       const data = (await getProfiles()) as SupabaseProfileRow[];
       console.log("Profiles from Supabase:", data);
-
-      const mappedProfiles = mapSupabaseProfiles(data || []);
-      setProfiles(mappedProfiles);
+      setProfiles(mapSupabaseProfiles(data || []));
     } catch (error) {
       console.error("Error loading profiles:", error);
       toast({
@@ -120,31 +123,64 @@ export default function Dashboard() {
     loadProfiles();
   }, [loadProfiles]);
 
+  // ─── Daily report notification (fires once per calendar day per user) ───────
+
+  useEffect(() => {
+    async function maybeSendDailyReport() {
+      try {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+
+        if (!user) return;
+
+        // Fire at most once per calendar day
+        const key = `daily_report_sent_${user.id}`;
+        const lastSent = localStorage.getItem(key);
+        const today = new Date().toDateString();
+        if (lastSent === today) return;
+
+        // Count messages sent today (adjust table name to match your schema)
+        const startOfDay = new Date();
+        startOfDay.setHours(0, 0, 0, 0);
+
+        const { count } = await supabase
+          .from("message_logs")
+          .select("id", { count: "exact", head: true })
+          .eq("user_id", user.id)
+          .gte("created_at", startOfDay.toISOString());
+
+        const messageCount = count ?? 0;
+        if (messageCount > 0) {
+          await notifyDailyReport(user.id, messageCount);
+        }
+
+        localStorage.setItem(key, today);
+      } catch (err) {
+        console.warn("Daily report notification skipped:", err);
+      }
+    }
+
+    maybeSendDailyReport();
+  }, []);
+
+  // ─── Handlers ──────────────────────────────────────────────────────────────
+
   const handleCreateProfile = async (name: string) => {
     try {
       const created = await createProfile(name);
-
+      // 🚀 notifyProfileCreated() fired inside createProfile() in profileApi.ts
       await loadProfiles();
       setCreateModalOpen(false);
-
       toast({
         title: "Profile Created 🎉",
         description: `WhatsApp profile "${created.name}" has been created successfully.`,
       });
     } catch (error) {
       console.error("Error creating profile:", error);
-
       const message =
-        error instanceof Error
-          ? error.message
-          : "Failed to create profile.";
-
-      toast({
-        title: "Error",
-        description: message,
-        variant: "destructive",
-      });
-
+        error instanceof Error ? error.message : "Failed to create profile.";
+      toast({ title: "Error", description: message, variant: "destructive" });
       throw error;
     }
   };
@@ -152,75 +188,33 @@ export default function Dashboard() {
   const handleDeleteProfile = async (id: string) => {
     try {
       await deleteProfile(id);
-
       setProfiles((prev) => prev.filter((p) => p.id !== id));
-
-      toast({
-        title: "Profile Deleted",
-        description: "The profile has been removed successfully.",
-      });
+      toast({ title: "Profile Deleted", description: "The profile has been removed successfully." });
     } catch (error) {
       console.error("Error deleting profile:", error);
-      toast({
-        title: "Error",
-        description: "Failed to delete profile.",
-        variant: "destructive",
-      });
-    }
-  };
-
-  const handleWhatsAppConnected = async (id: string) => {
-    try {
-      await connectWhatsApp(id);
-      await loadProfiles();
-      setConnectModalProfileId(null);
-
-      toast({
-        title: "WhatsApp Connected ✅",
-        description: "Your WhatsApp account is now linked through Evolution API.",
-      });
-    } catch (error) {
-      console.error("Error connecting WhatsApp:", error);
-
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Failed to save WhatsApp connection.";
-
-      toast({
-        title: "Error",
-        description: message,
-        variant: "destructive",
-      });
+      toast({ title: "Error", description: "Failed to delete profile.", variant: "destructive" });
     }
   };
 
   const handleDisconnectWhatsApp = async (id: string) => {
     try {
       await disconnectWhatsApp(id);
+      // 🔴 notifyWhatsAppDisconnected() fired inside disconnectWhatsApp() in profileApi.ts
       await loadProfiles();
-
       toast({
         title: "WhatsApp Disconnected",
         description: "The WhatsApp account has been disconnected from the dashboard.",
       });
     } catch (error) {
       console.error("Error disconnecting WhatsApp:", error);
-      toast({
-        title: "Error",
-        description: "Failed to disconnect WhatsApp.",
-        variant: "destructive",
-      });
+      toast({ title: "Error", description: "Failed to disconnect WhatsApp.", variant: "destructive" });
     }
   };
 
   const handleSaveConfig = async (id: string, config: AssistantConfig) => {
     try {
       const selectedProfile = profiles.find((p) => p.id === id);
-
-      if (!selectedProfile) {
-        throw new Error("Profile not found.");
-      }
+      if (!selectedProfile) throw new Error("Profile not found.");
 
       if (selectedProfile.status === "not_connected") {
         throw new Error("Connect WhatsApp first before activating the assistant.");
@@ -231,31 +225,36 @@ export default function Dashboard() {
       setConfigModalProfileId(null);
 
       if (config.isActive) {
-        toast({
-          title: "AI Activated 🚀",
-          description: "Your assistant is now ready to reply automatically.",
-        });
+        toast({ title: "AI Activated 🚀", description: "Your assistant is now ready to reply automatically." });
       } else {
-        toast({
-          title: "Configuration Saved",
-          description: "Assistant settings updated.",
-        });
+        toast({ title: "Configuration Saved", description: "Assistant settings updated." });
       }
     } catch (error) {
       console.error("Error saving assistant config:", error);
-
       const message =
-        error instanceof Error
-          ? error.message
-          : "Failed to save assistant configuration.";
-
-      toast({
-        title: "Error",
-        description: message,
-        variant: "destructive",
-      });
+        error instanceof Error ? error.message : "Failed to save assistant configuration.";
+      toast({ title: "Error", description: message, variant: "destructive" });
     }
   };
+
+  // ─── Upgrade click — scrolls to section AND sends upgrade push ────────────
+
+  const handleUpgradeClick = async () => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        // 👑 Upgrade available notification
+        notifyUpgradeAvailable(user.id).catch(console.error);
+      }
+    } catch {
+      // non-critical
+    }
+    document
+      .getElementById("subscription-section")
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  // ─── Render ────────────────────────────────────────────────────────────────
 
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col font-sans overflow-x-hidden relative">
@@ -270,47 +269,24 @@ export default function Dashboard() {
           profiles={profiles}
           onCreateClick={() => setCreateModalOpen(true)}
           onConnectClick={(id) => {
-            const selectedProfile = profiles.find(
-              (p) => p.id === id
-            );
-
+            const selectedProfile = profiles.find((p) => p.id === id);
             if (!selectedProfile) return;
-
-            localStorage.setItem(
-              "active_profile",
-              selectedProfile.name
-            );
-
-            console.log(
-              "ACTIVE PROFILE:",
-              selectedProfile.name
-            );
-
+            localStorage.setItem("active_profile", selectedProfile.name);
+            console.log("ACTIVE PROFILE:", selectedProfile.name);
             setConnectModalProfileId(id);
           }}
           onConfigClick={(id) => {
             const selectedProfile = profiles.find((p) => p.id === id);
-
             if (!selectedProfile) return;
-
-            localStorage.setItem(
-              "active_profile",
-              selectedProfile.name
-            );
-
-            console.log(
-              "ACTIVE PROFILE:",
-              selectedProfile.name
-            );
+            localStorage.setItem("active_profile", selectedProfile.name);
+            console.log("ACTIVE PROFILE:", selectedProfile.name);
 
             if (selectedProfile.status === "not_connected") {
               toast({
                 title: "Connect WhatsApp First",
-                description:
-                  "You need to connect WhatsApp before configuring the assistant.",
+                description: "You need to connect WhatsApp before configuring the assistant.",
                 variant: "destructive",
               });
-
               return;
             }
 
@@ -320,10 +296,13 @@ export default function Dashboard() {
           onDisconnectClick={handleDisconnectWhatsApp}
         />
 
+        {/* Subscription section — target of DashboardHeader Upgrade button */}
+        <div id="subscription-section" className="mt-28">
+          <SubscriptionSection />
+        </div>
+
         {isLoadingProfiles && (
-          <div className="text-sm text-muted-foreground px-1">
-            Syncing profiles...
-          </div>
+          <div className="text-sm text-muted-foreground px-1">Syncing profiles...</div>
         )}
       </main>
 
@@ -340,7 +319,6 @@ export default function Dashboard() {
         onConnected={async () => {
           setConnectModalProfileId(null);
           await loadProfiles();
-
           toast({
             title: "WhatsApp Connected ✅",
             description: "Your WhatsApp account is now linked successfully.",

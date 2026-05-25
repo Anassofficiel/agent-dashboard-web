@@ -1,5 +1,22 @@
-node_modules
-dist
+# ENV
 .env
+.env.*
 .env.local
-.env.*.local
+firebase.env
+
+# Firebase
+serviceAccount.json
+firebase-service-account.json
+
+# Supabase
+supabase/.env
+
+# Build
+dist
+node_modules
+
+# Logs
+*.log
+
+# OS
+.DS_Store

@@ -72,6 +72,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.103.0",
+    "firebase": "^12.13.0",
     "react-router-dom": "^7.15.1"
   }
 }
